@@ -1,0 +1,9 @@
+langchain
+langchain-ollama
+langchain-community
+chromadb
+pypdf
+
+fastapi
+uvicorn
+rank-bm25

@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+data/processed/
+chroma_db/
+*.sqlite
+.pytest_cache/
+.vscode/
+
+data/raw/*.pdf
