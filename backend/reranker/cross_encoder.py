@@ -12,163 +12,109 @@ class CrossEncoderReranker:
     """
     Reranks retrieved chunks using FlashRank cross-encoder.
 
-    WHY RERANKING?
+    POSITION IN PIPELINE:
+    Multi-query retrieval → [RERANKER] → Generator
 
-    The hybrid retriever uses bi-encoders — query and document
-    are embedded SEPARATELY then compared with cosine similarity.
+    Takes 18 unique chunks from multi-query retrieval.
+    Returns precise top 5 for the LLM.
 
-    Fast: O(1) at query time since doc vectors are pre-computed.
-    But imprecise: the model never sees query + document together.
-
-    A cross-encoder reads BOTH query and document simultaneously
-    enabling full attention between them. Much more accurate.
-
-    Too slow to run over thousands of documents — but perfect
-    for reranking a shortlist of 10-20 candidates.
-
-    THE PATTERN:
-    Bi-encoder  → retrieves top 20 broadly  (fast, recall-focused)
-    Cross-encoder → reranks to top 5 precisely (slow, precision-focused)
-
-    WHY FLASHRANK?
-    - Runs locally — no API key, no cost
-    - Fast enough on CPU
-    - No sensitive compliance data sent externally
-    - Multiple model options (nano for speed, small for accuracy)
+    WHY HERE:
+    Multi-query gives us high RECALL (finds everything relevant)
+    Cross-encoder gives us high PRECISION (ranks best ones first)
+    Together = best of both worlds
     """
 
     def __init__(self, model_name: str = "ms-marco-MiniLM-L-12-v2"):
-        print(f"[Reranker] Loading cross-encoder: {model_name}")
-        print(f"[Reranker] First load downloads the model (~50MB)...")
+        print(f"[Reranker] Loading model: {model_name}")
+        print(f"[Reranker] First run downloads ~50MB model...")
         self.ranker = Ranker(model_name=model_name)
         print(f"[Reranker] Ready.")
 
     def rerank(
         self,
-        query:    str,
-        chunks:   list[dict],
-        top_k:    int = 5
+        query:  str,
+        chunks: list[dict],
+        top_k:  int = 5
     ) -> list[dict]:
         """
         Rerank chunks by relevance to query.
 
-        Takes the hybrid retriever's output (10-20 chunks)
-        and returns the most relevant top_k.
+        Input:  18 chunks from multi-query retrieval
+        Output: top 5 most relevant chunks
 
-        Each chunk must have a 'text' key.
-        All other metadata is preserved.
+        Each chunk is scored by reading query + chunk
+        together — full attention, much more accurate
+        than cosine similarity alone.
         """
         if not chunks:
             return []
 
-        # FlashRank expects list of dicts with 'text' key
+        # FlashRank expects list of dicts with id + text
         passages = [
-            {
-                "id":   i,
-                "text": chunk["text"]
-            }
+            {"id": i, "text": chunk["text"]}
             for i, chunk in enumerate(chunks)
         ]
 
-        # build rerank request
         request = RerankRequest(query=query, passages=passages)
-
-        # run reranking
         results = self.ranker.rerank(request)
 
-        # map scores back to original chunks
         reranked = []
         for result in results[:top_k]:
-            original_idx   = result["id"]
-            original_chunk = chunks[original_idx].copy()
-
-            # add reranker score
+            original_chunk = chunks[result["id"]].copy()
             original_chunk["rerank_score"]    = result["score"]
             original_chunk["retrieval_score"] = original_chunk.get(
                 "rrf_score",
                 original_chunk.get("score", 0)
             )
             original_chunk["source"] = "reranked"
-
             reranked.append(original_chunk)
 
         return reranked
 
-    def rerank_with_scores(
-        self,
-        query:  str,
-        chunks: list[dict],
-        top_k:  int = 5
-    ) -> dict:
-        """
-        Same as rerank() but returns full comparison data.
-        Used in evaluation to measure reranker improvement.
-        """
-        reranked = self.rerank(query, chunks, top_k=top_k)
 
-        return {
-            "query":           query,
-            "before_rerank":   chunks[:top_k],
-            "after_rerank":    reranked,
-            "total_input":     len(chunks),
-            "total_output":    len(reranked)
-        }
-
-
-# ── Quick test ────────────────────────────────────────────────────────────────
+# ── Quick test ────────────────────────────────────────────────
 if __name__ == "__main__":
-    from backend.retrieval.hybrid_fusion import HybridRetriever
+    from backend.retrieval.hybrid_fusion        import HybridRetriever
+    from backend.query.multi_query_retriever    import multi_query_retrieve
 
-    # get hybrid results first
     retriever = HybridRetriever()
     reranker  = CrossEncoderReranker()
 
-    queries = [
-        "What is the right to erasure under GDPR?",
-        "What is the maximum fine for GDPR violation?",
-    ]
+    query = "What is the right to erasure under GDPR?"
 
-    for query in queries:
-        print(f"\n{'='*60}")
-        print(f"QUERY: {query}")
-        print(f"{'='*60}")
+    print(f"\n{'='*60}")
+    print(f"FULL PIPELINE TEST")
+    print(f"Query: {query}")
+    print(f"{'='*60}")
 
-        # Step 1 — hybrid retrieval (top 10)
-        hybrid_results = retriever.retrieve(query, top_k=10)
+    # Step 1 — multi query retrieval
+    retrieval_result = multi_query_retrieve(query, retriever, top_k=10)
+    chunks_before    = retrieval_result["final_chunks"]
 
-        # Step 2 — rerank to top 5
-        comparison = reranker.rerank_with_scores(
-            query  = query,
-            chunks = hybrid_results,
-            top_k  = 5
-        )
+    print(f"\nBEFORE RERANK — Top 3:")
+    for i, c in enumerate(chunks_before[:3], 1):
+        score = c.get("rrf_score", c.get("score", 0))
+        print(f"\n  #{i} Score: {score:.4f}")
+        print(f"     Page : {c['metadata'].get('page_number','?')}")
+        print(f"     Text : {c['text'][:120]}...")
 
-        print(f"\n--- BEFORE RERANK (Hybrid top 3) ---")
-        for i, r in enumerate(comparison["before_rerank"][:3]):
-            print(f"\n  #{i+1} RRF Score: {r.get('rrf_score', 0):.6f}")
-            print(f"       Page: {r['metadata'].get('page_number','?')}")
-            print(f"       Text: {r['text'][:120]}...")
+    # Step 2 — rerank
+    chunks_after = reranker.rerank(query, chunks_before, top_k=5)
 
-        print(f"\n--- AFTER RERANK (Cross-encoder top 3) ---")
-        for i, r in enumerate(comparison["after_rerank"][:3]):
-            print(f"\n  #{i+1} Rerank Score: {r['rerank_score']:.6f}")
-            print(f"       Page: {r['metadata'].get('page_number','?')}")
-            print(f"       Text: {r['text'][:120]}...")
+    print(f"\nAFTER RERANK — Top 3:")
+    for i, c in enumerate(chunks_after[:3], 1):
+        print(f"\n  #{i} Rerank Score: {c['rerank_score']:.4f}")
+        print(f"     Page        : {c['metadata'].get('page_number','?')}")
+        print(f"     Text        : {c['text'][:120]}...")
 
-        # key insight — did ranking change?
-        before_pages = [
-            r['metadata'].get('page_number','?')
-            for r in comparison["before_rerank"][:3]
-        ]
-        after_pages = [
-            r['metadata'].get('page_number','?')
-            for r in comparison["after_rerank"][:3]
-        ]
+    # show if order changed
+    before_pages = [c['metadata'].get('page_number','?') for c in chunks_before[:3]]
+    after_pages  = [c['metadata'].get('page_number','?') for c in chunks_after[:3]]
 
-        print(f"\n  Pages before rerank : {before_pages}")
-        print(f"  Pages after rerank  : {after_pages}")
+    print(f"\nPages before rerank : {before_pages}")
+    print(f"Pages after rerank  : {after_pages}")
 
-        if before_pages != after_pages:
-            print(f"  ✅ Reranker changed the order — adding value")
-        else:
-            print(f"  ➡️  Same order — reranker confirmed hybrid ranking")
+    if before_pages != after_pages:
+        print(f"✅ Reranker changed the order — adding value")
+    else:
+        print(f"➡️  Same order — reranker confirmed retrieval ranking")
