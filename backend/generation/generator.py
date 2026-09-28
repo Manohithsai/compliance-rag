@@ -15,9 +15,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 def build_prompt(query: str, chunks: list[dict]) -> str:
     """
     Build the prompt that goes to Llama.
-    This is where we inject retrieved context.
+    Chunks are already deduplicated before this is called.
     """
-    # format retrieved chunks into readable context
     context_parts = []
     for i, chunk in enumerate(chunks, start=1):
         page = chunk["metadata"].get("page_number", "?")
@@ -42,7 +41,6 @@ ANSWER:"""
 
     return prompt
 
-
 def generate_answer(query: str, chunks: list[dict]) -> dict:
     """
     Generate an answer using Llama + retrieved chunks.
@@ -55,10 +53,20 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
             "query":   query
         }
 
-    print(f"[Generator] Generating answer for: '{query[:60]}...'")
-    print(f"[Generator] Using {len(chunks)} chunks as context...")
+    # deduplicate by page number FIRST
+    seen_pages    = set()
+    unique_chunks = []
 
-    prompt = build_prompt(query, chunks)
+    for chunk in chunks:
+        page = chunk["metadata"].get("page_number", "?")
+        if page not in seen_pages:
+            seen_pages.add(page)
+            unique_chunks.append(chunk)
+
+    print(f"[Generator] Generating answer for: '{query[:60]}...'")
+    print(f"[Generator] Using {len(unique_chunks)} unique chunks (from {len(chunks)} retrieved)...")
+
+    prompt   = build_prompt(query, unique_chunks)
 
     response = ollama.chat(
         model    = OLLAMA_MODEL,
@@ -67,14 +75,14 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
 
     answer = response["message"]["content"]
 
-    # build sources list for citations
+    # build sources from unique chunks only
     sources = []
-    for i, chunk in enumerate(chunks, start=1):
+    for i, chunk in enumerate(unique_chunks, start=1):
         sources.append({
-            "source_num":  i,
-            "page":        chunk["metadata"].get("page_number", "?"),
-            "doc":         chunk["metadata"].get("doc_name", "unknown"),
-            "preview":     chunk["text"][:100] + "..."
+            "source_num": i,
+            "page":       chunk["metadata"].get("page_number", "?"),
+            "doc":        chunk["metadata"].get("doc_name", "unknown"),
+            "preview":    chunk["text"][:100] + "..."
         })
 
     print(f"[Generator] Done.\n")
