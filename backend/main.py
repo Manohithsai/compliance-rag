@@ -13,7 +13,14 @@ from backend.query.multi_query_retriever    import multi_query_retrieve
 from backend.reranker.cross_encoder         import CrossEncoderReranker
 from backend.generation.generator           import generate_answer
 from backend.ingestion.pipeline             import ingest_document
-
+from backend.evaluation.conflict_detector   import (
+    detect_conflicts_in_results,
+    format_conflicts_for_response
+)
+from backend.evaluation.hallucination import (
+    check_hallucination,
+    format_hallucination_for_response
+)
 # ── App setup ─────────────────────────────────────────────────
 app = FastAPI(
     title       = "ComplianceRAG API",
@@ -35,10 +42,12 @@ class QueryRequest(BaseModel):
     use_reranker:   bool = True
 
 class QueryResponse(BaseModel):
-    question:       str
-    answer:         str
-    sources:        list[dict]
-    pipeline_used:  dict
+    question:        str
+    answer:          str
+    sources:         list[dict]
+    conflicts:       list[dict]
+    hallucination:   dict
+    pipeline_used:   dict
 
 # ── Routes ────────────────────────────────────────────────────
 @app.get("/health")
@@ -102,13 +111,31 @@ def query(request: QueryRequest):
     else:
         chunks = chunks[:request.top_k]
 
-    # ── Step 3: Generation ────────────────────────────────────
+    # ── Step 3: Conflict Detection ────────────────────────────
+    conflicts = []
+    if len(chunks) > 1:
+        raw_conflicts = detect_conflicts_in_results(chunks)
+        conflicts     = format_conflicts_for_response(raw_conflicts)
+
+    # ── Step 4: Generation ────────────────────────────────────
+        # ── Step 4: Generation ────────────────────────────────────
     result = generate_answer(request.question, chunks)
+
+    # ── Step 5: Hallucination Check ───────────────────────────
+    hallucination_result = check_hallucination(
+        answer = result["answer"],
+        chunks = chunks
+    )
+    hallucination = format_hallucination_for_response(
+        hallucination_result
+    )
 
     return QueryResponse(
         question      = request.question,
         answer        = result["answer"],
         sources       = result["sources"],
+        conflicts     = conflicts,
+        hallucination = hallucination,
         pipeline_used = pipeline_info
     )
 
