@@ -13,6 +13,10 @@ from backend.query.multi_query_retriever    import multi_query_retrieve
 from backend.reranker.cross_encoder         import CrossEncoderReranker
 from backend.generation.generator           import generate_answer
 from backend.ingestion.pipeline             import ingest_document
+from backend.mcp.audit_logger import (
+    init_audit_db,
+    log_query
+)
 from backend.evaluation.conflict_detector   import (
     detect_conflicts_in_results,
     format_conflicts_for_response
@@ -32,6 +36,7 @@ app = FastAPI(
 print("[Main] Initializing pipeline components...")
 retriever = HybridRetriever()
 reranker  = CrossEncoderReranker()
+init_audit_db()
 print("[Main] All components ready.\n")
 
 # ── Request/Response models ────────────────────────────────────
@@ -130,6 +135,17 @@ def query(request: QueryRequest):
         hallucination_result
     )
 
+        # ── Step 6: Audit Logging ─────────────────────────────────
+    log_query(
+        question         = request.question,
+        answer           = result["answer"],
+        sources          = result["sources"],
+        conflicts        = conflicts,
+        hallucination    = hallucination,
+        pipeline_used    = pipeline_info,
+        response_time_ms = 0.0
+    )
+
     return QueryResponse(
         question      = request.question,
         answer        = result["answer"],
@@ -203,4 +219,12 @@ def status():
         "child_chunks":  get_collection_stats(child),
         "parent_chunks": get_collection_stats(parent),
         "pipeline":      "advanced"
+    }
+@app.get("/audit")
+def get_audit_logs():
+    """Returns recent query audit logs."""
+    from backend.mcp.audit_logger import get_audit_logs, get_audit_stats
+    return {
+        "stats": get_audit_stats(),
+        "logs":  get_audit_logs(limit=20)
     }
