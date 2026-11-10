@@ -1,9 +1,11 @@
-langchain
-langchain-ollama
-langchain-community
 chromadb
 pypdf
-
+rank-bm25
+flashrank
+ollama
+python-dotenv
 fastapi
 uvicorn
-rank-bm25
+streamlit
+requests
+pydantic
